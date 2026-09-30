@@ -2,6 +2,8 @@ package ru.example.iiko;
 
 import com.sun.net.httpserver.HttpServer;
 
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -25,6 +27,11 @@ import java.util.concurrent.TimeUnit;
  */
 public class Main {
     public static void main(String[] args) throws Exception {
+        // Консоль может быть настроена не на UTF-8 (напр. systemd/некоторые терминалы) -
+        // явно переопределяем кодировку stdout/stderr, чтобы кириллица в логах не превращалась в "?".
+        System.setOut(new PrintStream(System.out, true, StandardCharsets.UTF_8));
+        System.setErr(new PrintStream(System.err, true, StandardCharsets.UTF_8));
+
         String mode = System.getenv().getOrDefault("MODE", "api").trim().toLowerCase();
         switch (mode) {
             case "api":
