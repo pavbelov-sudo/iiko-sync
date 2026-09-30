@@ -11,10 +11,10 @@ import java.util.concurrent.TimeUnit;
 /**
  * Точка входа. Режим выбирается переменной окружения MODE:
  *
- * <p><b>MODE=api</b> (по умолчанию) - поднимает HTTP-шлюз с двумя эндпоинтами
- * (см. {@link ApiServer}): POST /api/token и POST /api/nomenclature. Учётные данные
- * и токен передаются в каждом запросе вызывающей стороной, приложение ничего
- * не хранит между запросами.
+ * <p><b>MODE=api</b> (по умолчанию) - поднимает HTTP-шлюз с одним эндпоинтом
+ * (см. {@link ApiServer}): POST /api/nomenclature. Вызывающая сторона передаёт
+ * apiKey/appId/clientSecret и organizationId/terminalId, а приложение само
+ * получает токен от iiko и запрашивает номенклатуру - ничего не хранит между запросами.
  *   PORT                  - порт сервера (по умолчанию 8080 для HTTP, 8443 для HTTPS)
  *   TLS_ENABLED           - true, чтобы поднять HTTPS вместо HTTP (по умолчанию false)
  *   TLS_KEYSTORE          - путь к PKCS12-хранилищу с сертификатом (обязательно при TLS_ENABLED=true)
@@ -79,7 +79,7 @@ public class Main {
 
         System.out.println("iiko-sync API слушает по " + scheme + " на порту " +
                 (tls ? System.getenv().getOrDefault("PORT", "8443") : System.getenv().getOrDefault("PORT", "8080")) +
-                " (POST /api/token, POST /api/nomenclature, GET /health)");
+                " (POST /api/nomenclature, GET /health)");
         Runtime.getRuntime().addShutdownHook(new Thread(() -> server.stop(1)));
         Thread.currentThread().join(); // держим процесс живым
     }
