@@ -15,7 +15,10 @@ import java.util.concurrent.TimeUnit;
  * (см. {@link ApiServer}): POST /api/token и POST /api/nomenclature. Учётные данные
  * и токен передаются в каждом запросе вызывающей стороной, приложение ничего
  * не хранит между запросами.
- *   PORT - порт HTTP-сервера (по умолчанию 8080)
+ *   PORT                  - порт сервера (по умолчанию 8080 для HTTP, 8443 для HTTPS)
+ *   TLS_ENABLED           - true, чтобы поднять HTTPS вместо HTTP (по умолчанию false)
+ *   TLS_KEYSTORE          - путь к PKCS12-хранилищу с сертификатом (обязательно при TLS_ENABLED=true)
+ *   TLS_KEYSTORE_PASSWORD - пароль хранилища (обязательно при TLS_ENABLED=true)
  *
  * <p><b>MODE=sync</b> - прежний пакетный режим: сам получает и обновляет токен,
  * периодически выгружает номенклатуру/стоп-листы/меню в локальный SQLite (см. {@link SyncService}).
@@ -47,9 +50,35 @@ public class Main {
     }
 
     private static void runApiServer() throws Exception {
-        int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
-        HttpServer server = new ApiServer().start(port);
-        System.out.println("iiko-sync API слушает на порту " + port +
+        boolean tls = Boolean.parseBoolean(System.getenv().getOrDefault("TLS_ENABLED", "false"));
+        ApiServer api = new ApiServer();
+        HttpServer server;
+        String scheme;
+
+        if (tls) {
+            int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8443"));
+            String keystorePath = System.getenv("TLS_KEYSTORE");
+            String keystorePassword = System.getenv("TLS_KEYSTORE_PASSWORD");
+            if (keystorePath == null || keystorePath.isBlank()) {
+                System.err.println("TLS_ENABLED=true, но не задан TLS_KEYSTORE (путь к PKCS12-хранилищу)");
+                System.exit(1);
+                return;
+            }
+            if (keystorePassword == null) {
+                System.err.println("TLS_ENABLED=true, но не задан TLS_KEYSTORE_PASSWORD");
+                System.exit(1);
+                return;
+            }
+            server = api.startHttps(port, keystorePath, keystorePassword.toCharArray());
+            scheme = "https";
+        } else {
+            int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
+            server = api.start(port);
+            scheme = "http";
+        }
+
+        System.out.println("iiko-sync API слушает по " + scheme + " на порту " +
+                (tls ? System.getenv().getOrDefault("PORT", "8443") : System.getenv().getOrDefault("PORT", "8080")) +
                 " (POST /api/token, POST /api/nomenclature, GET /health)");
         Runtime.getRuntime().addShutdownHook(new Thread(() -> server.stop(1)));
         Thread.currentThread().join(); // держим процесс живым

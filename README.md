@@ -22,6 +22,40 @@ export PORT=8080   # необязательно, по умолчанию 8080
 java -jar target/iiko-sync-1.0.0.jar
 ```
 
+### HTTPS
+
+По умолчанию сервер поднимается по обычному HTTP. Чтобы включить HTTPS:
+
+```bash
+export TLS_ENABLED=true
+export TLS_KEYSTORE=/путь/к/keystore.p12
+export TLS_KEYSTORE_PASSWORD='пароль_хранилища'
+export PORT=8443   # необязательно, по умолчанию 8443 при включённом TLS
+java -jar target/iiko-sync-1.0.0.jar
+```
+
+Сертификат и ключ должны лежать в PKCS12-хранилище. Самоподписанный сертификат для быстрого
+старта (браузеры и `curl` без `-k`/`--insecure` будут показывать предупреждение о недоверенном
+сертификате, но канал зашифрован):
+
+```bash
+keytool -genkeypair -alias iiko-sync -keyalg RSA -keysize 2048 -validity 3650 \
+  -keystore keystore.p12 -storetype PKCS12 -storepass 'пароль_хранилища' \
+  -dname "CN=<ваш-домен-или-IP>, OU=iiko-sync, O=iiko-sync, C=RU"
+```
+
+Для настоящего сертификата без предупреждений (например, от Let's Encrypt) нужен домен,
+указывающий на сервер, и его нужно сконвертировать в PKCS12:
+
+```bash
+openssl pkcs12 -export -in fullchain.pem -inkey privkey.pem \
+  -out keystore.p12 -name iiko-sync -passout pass:'пароль_хранилища'
+```
+
+Приложение не занимается получением/обновлением сертификатов само - это должно делать
+внешнее средство (certbot/acme.sh и т.п.), а готовое хранилище просто указывается через
+`TLS_KEYSTORE`.
+
 ### POST /api/token — получить токен
 
 Принимает `apiKey` (то же самое, что `apiLogin` в iikoWeb — можно передать любым из двух имён),

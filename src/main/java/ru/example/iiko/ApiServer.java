@@ -5,10 +5,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.HttpsConfigurator;
+import com.sun.net.httpserver.HttpsServer;
 
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.security.KeyStore;
 import java.util.concurrent.Executors;
 
 /**
@@ -36,12 +43,42 @@ public class ApiServer {
 
     public HttpServer start(int port) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
+        registerContexts(server);
+        server.start();
+        return server;
+    }
+
+    /**
+     * Поднимает тот же шлюз по HTTPS. Ключ и сертификат берутся из PKCS12-хранилища
+     * (см. README - раздел про TLS): самоподписанный сертификат для быстрого запуска,
+     * либо настоящий сертификат (например, от Let's Encrypt), сконвертированный в PKCS12.
+     */
+    public HttpServer startHttps(int port, String keystorePath, char[] keystorePassword) throws Exception {
+        KeyStore ks = KeyStore.getInstance("PKCS12");
+        try (FileInputStream fis = new FileInputStream(keystorePath)) {
+            ks.load(fis, keystorePassword);
+        }
+
+        KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        kmf.init(ks, keystorePassword);
+        TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        tmf.init(ks);
+
+        SSLContext sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(kmf.getKeyManagers(), tmf.getTrustManagers(), null);
+
+        HttpsServer server = HttpsServer.create(new InetSocketAddress(port), 0);
+        server.setHttpsConfigurator(new HttpsConfigurator(sslContext));
+        registerContexts(server);
+        server.start();
+        return server;
+    }
+
+    private void registerContexts(HttpServer server) {
         server.createContext("/api/token", this::handleToken);
         server.createContext("/api/nomenclature", this::handleNomenclature);
         server.createContext("/health", ex -> respond(ex, 200, om.createObjectNode().put("status", "ok")));
         server.setExecutor(Executors.newCachedThreadPool());
-        server.start();
-        return server;
     }
 
     private void handleToken(HttpExchange ex) throws IOException {
