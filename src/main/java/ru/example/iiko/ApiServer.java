@@ -35,13 +35,18 @@ import java.util.concurrent.Executors;
  *       методов iiko, который её вернул (см. {@link #respondUpstreamError}).</li>
  * </ol>
  *
- * <p>Токен не кэшируется - на каждый вызов запрашивается заново (срок жизни токена iiko - 1 час,
- * см. README). Ничего не хранится и не кэшируется между запросами: все учётные данные вызывающая
- * сторона передаёт каждый раз сама.
+ * <p>Токен кэшируется в памяти процесса (см. {@link TokenCache}) отдельно для каждого набора
+ * входящих учётных данных (apiKey/appId/clientSecret) - разные ключи получают разные токены
+ * и не мешают друг другу. Токен переиспользуется, пока не истёк (с запасом), поэтому при частых
+ * вызовах с одним и тем же ключом лишний запрос к {@code /api/v2/access_token} на каждый вызов
+ * не делается. Если iiko всё же отвечает 401 на уже закэшированный токен (например, ключ отозвали
+ * или он истёк раньше срока), кэш для этого набора данных сбрасывается и токен запрашивается
+ * заново один раз автоматически.
  */
 public class ApiServer {
     private final ObjectMapper om = new ObjectMapper();
     private final IikoGatewayClient iiko = new IikoGatewayClient();
+    private final TokenCache tokenCache = new TokenCache();
 
     public HttpServer start(int port) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
@@ -113,13 +118,7 @@ public class ApiServer {
 
         String token;
         try {
-            JsonNode tokenResp = iiko.fetchTokenV2(apiLogin, appId, clientSecret);
-            token = tokenResp.path("token").asText(null);
-            if (token == null || token.isBlank()) {
-                // iiko вернул 2xx, но без поля token - отдаём этот ответ как есть, чтобы не потерять контекст.
-                respondError(ex, 502, "/api/v2/access_token не вернул поле token: " + tokenResp);
-                return;
-            }
+            token = fetchTokenCached(apiLogin, appId, clientSecret);
         } catch (IikoGatewayClient.UpstreamException e) {
             respondUpstreamError(ex, "/api/v2/access_token", e);
             return;
@@ -132,17 +131,54 @@ public class ApiServer {
             return;
         }
 
+        JsonNode iikoResp;
         try {
-            JsonNode iikoResp = iiko.fetchNomenclature(token, organizationId, terminalId);
-            respond(ex, 200, iikoResp);
+            iikoResp = iiko.fetchNomenclature(token, organizationId, terminalId);
         } catch (IikoGatewayClient.UpstreamException e) {
-            respondUpstreamError(ex, "/api/1/nomenclature", e);
+            if (e.statusCode != 401) {
+                respondUpstreamError(ex, "/api/1/nomenclature", e);
+                return;
+            }
+            // Закэшированный токен отклонён (истёк раньше срока/отозван) - сбрасываем кэш
+            // для этого набора данных и пробуем один раз с заведомо свежим токеном.
+            tokenCache.invalidate(apiLogin, appId, clientSecret);
+            try {
+                String freshToken = fetchTokenCached(apiLogin, appId, clientSecret);
+                iikoResp = iiko.fetchNomenclature(freshToken, organizationId, terminalId);
+            } catch (IikoGatewayClient.UpstreamException retryTokenErr) {
+                respondUpstreamError(ex, "/api/v2/access_token", retryTokenErr);
+                return;
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                respondError(ex, 503, "Запрос к iiko прерван, попробуйте ещё раз");
+                return;
+            } catch (Exception retryErr) {
+                respondError(ex, 502, "Не удалось повторно получить токен/номенклатуру от iiko: " + retryErr.getMessage());
+                return;
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             respondError(ex, 503, "Запрос номенклатуры к iiko прерван, попробуйте ещё раз");
+            return;
         } catch (Exception e) {
             respondError(ex, 502, "Не удалось получить номенклатуру от iiko: " + e.getMessage());
+            return;
         }
+
+        respond(ex, 200, iikoResp);
+    }
+
+    /** Токен из кэша (см. {@link TokenCache}), если он ещё жив, иначе - свежий через /api/v2/access_token. */
+    private String fetchTokenCached(String apiLogin, String appId, String clientSecret) throws Exception {
+        return tokenCache.getOrRefresh(apiLogin, appId, clientSecret, () -> {
+            JsonNode tokenResp = iiko.fetchTokenV2(apiLogin, appId, clientSecret);
+            String token = tokenResp.path("token").asText(null);
+            if (token == null || token.isBlank()) {
+                // iiko вернул 2xx, но без поля token - отдаём этот ответ как есть, чтобы не потерять контекст.
+                throw new IOException("/api/v2/access_token не вернул поле token: " + tokenResp);
+            }
+            return token;
+        });
     }
 
     /** Пробрасываем ошибку iiko вызывающей стороне вместе с тем, какой из двух методов её вернул. */
