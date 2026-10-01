@@ -57,6 +57,67 @@ openssl pkcs12 -export -in fullchain.pem -inkey privkey.pem \
 внешнее средство (certbot/acme.sh и т.п.), а готовое хранилище просто указывается через
 `TLS_KEYSTORE`.
 
+### Аутентификация клиента по сертификату (mTLS, по CommonName)
+
+Эндпоинт `/api/nomenclature` сам по себе не требует никакой аутентификации - вызывающая
+сторона просто передаёт учётные данные iiko в теле запроса. Если сервис доступен из интернета
+без дополнительной защиты (как было изначально), это открывает его для анонимного трафика,
+включая сканеры/боты - именно это стало причиной утечки памяти (см. ниже). Поэтому рекомендуется
+включить обязательную клиентскую TLS-аутентификацию (mTLS): сервер принимает только клиентов,
+предъявивших сертификат, подписанный доверенным CA, и дополнительно сверяет CommonName (CN)
+этого сертификата со списком разрешённых:
+
+```bash
+export TLS_ENABLED=true
+export TLS_KEYSTORE=/путь/к/keystore.p12
+export TLS_KEYSTORE_PASSWORD='пароль_хранилища'
+
+export TLS_CLIENT_AUTH_ENABLED=true
+export TLS_CLIENT_TRUSTSTORE=/путь/к/truststore.p12          # PKCS12 с сертификатом CA
+export TLS_CLIENT_TRUSTSTORE_PASSWORD='пароль_truststore'
+export TLS_CLIENT_ALLOWED_CNS='partner-1,partner-2'           # через запятую
+
+java -jar target/iiko-sync-1.0.0.jar
+```
+
+Без валидного клиентского сертификата TLS-рукопожатие не завершится вообще - запрос не
+дойдёт даже до кода приложения (проверено: `curl` без сертификата получает обрыв соединения,
+а не HTTP-ответ). Сертификат с верным CN, но от **другого** CA, тоже отклоняется на уровне
+TLS - совпадение CN само по себе ничего не даёт, обязательна подпись доверенного CA. Если
+сертификат от доверенного CA, но CN не входит в `TLS_CLIENT_ALLOWED_CNS` - приложение уже
+само отвечает `403`.
+
+Как завести тестовый CA и клиентский сертификат (`keytool`, без сторонних зависимостей):
+
+```bash
+# 1. Свой центр сертификации (CA) - один раз
+keytool -genkeypair -alias ca -keyalg RSA -keysize 2048 -validity 3650 \
+  -keystore ca.p12 -storetype PKCS12 -storepass 'пароль_ca' \
+  -dname "CN=iiko-sync-ca" -ext bc:c=ca:true
+keytool -exportcert -alias ca -keystore ca.p12 -storepass 'пароль_ca' -file ca.crt -rfc
+
+# 2. Truststore сервера - кладём туда сертификат CA (это и есть TLS_CLIENT_TRUSTSTORE)
+keytool -importcert -alias ca -file ca.crt -keystore truststore.p12 -storetype PKCS12 \
+  -storepass 'пароль_truststore' -noprompt
+
+# 3. Сертификат для конкретного клиента, подписанный этим CA; CN = его имя в TLS_CLIENT_ALLOWED_CNS
+keytool -genkeypair -alias partner-1 -keyalg RSA -keysize 2048 -validity 825 \
+  -keystore partner-1.p12 -storetype PKCS12 -storepass 'пароль_клиента' -dname "CN=partner-1"
+keytool -certreq -alias partner-1 -keystore partner-1.p12 -storepass 'пароль_клиента' -file partner-1.csr
+keytool -gencert -alias ca -keystore ca.p12 -storepass 'пароль_ca' \
+  -infile partner-1.csr -outfile partner-1-signed.crt -rfc -validity 825
+keytool -importcert -alias ca -file ca.crt -keystore partner-1.p12 -storepass 'пароль_клиента' -noprompt
+keytool -importcert -alias partner-1 -file partner-1-signed.crt -keystore partner-1.p12 -storepass 'пароль_клиента'
+```
+
+`partner-1.p12` отдаётся клиенту - он использует его как собственный TLS-сертификат при вызове:
+
+```bash
+curl --cert-type P12 --cert partner-1.p12:пароль_клиента \
+  -X POST https://ваш-сервер:8443/api/nomenclature \
+  -H "Content-Type: application/json" -d '{...}'
+```
+
 ### POST /api/nomenclature — получить номенклатуру
 
 Единственный эндпоинт. Принимает в одном запросе учётные данные и параметры организации,
@@ -88,6 +149,18 @@ curl -s -X POST http://localhost:8080/api/nomenclature \
 Если iiko всё же ответит `401` на уже закэшированный токен (истёк раньше срока или был отозван),
 приложение один раз автоматически сбросит кэш для этого набора данных и запросит токен заново —
 без участия вызывающей стороны.
+
+> **Инцидент с утечкой памяти (исправлено).** Изначальная реализация кэша добавляла запись
+> для *любого* входящего набора `apiKey`/`appId`/`clientSecret`, даже если запрос токена по
+> нему проваливался - пустая запись оставалась в памяти навсегда. Поскольку эндпоинт открыт
+> в интернет без аутентификации на уровне приложения, поток запросов со случайными/поддельными
+> данными (сканер, бот) приводил к неограниченному росту карты в памяти и, как следствие, к
+> постоянной загрузке CPU на сборку мусора (GC-трэшинг). Исправлено: (1) запись, для которой
+> не удалось получить токен, в кэше не остаётся; (2) кэш ограничен по размеру (500 записей,
+> LRU-вытеснение) на случай, если кто-то намеренно "накормит" эндпоинт множеством разных
+> правдоподобных наборов данных. Дополнительно советуем включить аутентификацию клиента по
+> сертификату (см. раздел выше) - она не позволит анонимному трафику вообще достучаться до
+> этого кода.
 
 В ответ отдаётся:
 - **200** — номенклатура от iiko как есть (группы, товары, цены), если оба шага прошли успешно;

@@ -4,6 +4,8 @@ import com.sun.net.httpserver.HttpServer;
 
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -15,10 +17,14 @@ import java.util.concurrent.TimeUnit;
  * (см. {@link ApiServer}): POST /api/nomenclature. Вызывающая сторона передаёт
  * apiKey/appId/clientSecret и organizationId/terminalId, а приложение само
  * получает токен от iiko и запрашивает номенклатуру - ничего не хранит между запросами.
- *   PORT                  - порт сервера (по умолчанию 8080 для HTTP, 8443 для HTTPS)
- *   TLS_ENABLED           - true, чтобы поднять HTTPS вместо HTTP (по умолчанию false)
- *   TLS_KEYSTORE          - путь к PKCS12-хранилищу с сертификатом (обязательно при TLS_ENABLED=true)
- *   TLS_KEYSTORE_PASSWORD - пароль хранилища (обязательно при TLS_ENABLED=true)
+ *   PORT                       - порт сервера (по умолчанию 8080 для HTTP, 8443 для HTTPS)
+ *   TLS_ENABLED                - true, чтобы поднять HTTPS вместо HTTP (по умолчанию false)
+ *   TLS_KEYSTORE               - путь к PKCS12-хранилищу с сертификатом (обязательно при TLS_ENABLED=true)
+ *   TLS_KEYSTORE_PASSWORD      - пароль хранилища (обязательно при TLS_ENABLED=true)
+ *   TLS_CLIENT_AUTH_ENABLED    - true, чтобы требовать клиентский сертификат (mTLS; требует TLS_ENABLED=true)
+ *   TLS_CLIENT_TRUSTSTORE      - PKCS12-хранилище с доверенным CA/сертификатами клиентов (обязательно при TLS_CLIENT_AUTH_ENABLED=true)
+ *   TLS_CLIENT_TRUSTSTORE_PASSWORD - пароль этого хранилища (обязательно при TLS_CLIENT_AUTH_ENABLED=true)
+ *   TLS_CLIENT_ALLOWED_CNS     - список через запятую разрешённых CommonName сертификата клиента (обязательно при TLS_CLIENT_AUTH_ENABLED=true)
  *
  * <p><b>MODE=sync</b> - прежний пакетный режим: сам получает и обновляет токен,
  * периодически выгружает номенклатуру/стоп-листы/меню в локальный SQLite (см. {@link SyncService}).
@@ -55,6 +61,13 @@ public class Main {
         HttpServer server;
         String scheme;
 
+        boolean clientAuth = Boolean.parseBoolean(System.getenv().getOrDefault("TLS_CLIENT_AUTH_ENABLED", "false"));
+        if (clientAuth && !tls) {
+            System.err.println("TLS_CLIENT_AUTH_ENABLED=true требует также TLS_ENABLED=true (mTLS работает только поверх HTTPS)");
+            System.exit(1);
+            return;
+        }
+
         if (tls) {
             int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8443"));
             String keystorePath = System.getenv("TLS_KEYSTORE");
@@ -69,8 +82,45 @@ public class Main {
                 System.exit(1);
                 return;
             }
-            server = api.startHttps(port, keystorePath, keystorePassword.toCharArray());
-            scheme = "https";
+
+            ApiServer.ClientAuthConfig clientAuthConfig = null;
+            if (clientAuth) {
+                String truststorePath = System.getenv("TLS_CLIENT_TRUSTSTORE");
+                String truststorePassword = System.getenv("TLS_CLIENT_TRUSTSTORE_PASSWORD");
+                String allowedCnsRaw = System.getenv("TLS_CLIENT_ALLOWED_CNS");
+                if (truststorePath == null || truststorePath.isBlank()) {
+                    System.err.println("TLS_CLIENT_AUTH_ENABLED=true, но не задан TLS_CLIENT_TRUSTSTORE");
+                    System.exit(1);
+                    return;
+                }
+                if (truststorePassword == null) {
+                    System.err.println("TLS_CLIENT_AUTH_ENABLED=true, но не задан TLS_CLIENT_TRUSTSTORE_PASSWORD");
+                    System.exit(1);
+                    return;
+                }
+                if (allowedCnsRaw == null || allowedCnsRaw.isBlank()) {
+                    System.err.println("TLS_CLIENT_AUTH_ENABLED=true, но не задан TLS_CLIENT_ALLOWED_CNS (список через запятую)");
+                    System.exit(1);
+                    return;
+                }
+                Set<String> allowedCns = new LinkedHashSet<>();
+                for (String cn : allowedCnsRaw.split(",")) {
+                    String trimmed = cn.trim();
+                    if (!trimmed.isEmpty()) {
+                        allowedCns.add(trimmed);
+                    }
+                }
+                if (allowedCns.isEmpty()) {
+                    System.err.println("TLS_CLIENT_ALLOWED_CNS задан, но после разбора не содержит ни одного CN");
+                    System.exit(1);
+                    return;
+                }
+                clientAuthConfig = new ApiServer.ClientAuthConfig(
+                        truststorePath, truststorePassword.toCharArray(), allowedCns);
+            }
+
+            server = api.startHttps(port, keystorePath, keystorePassword.toCharArray(), clientAuthConfig);
+            scheme = clientAuth ? "https (mTLS, проверка CN сертификата клиента)" : "https";
         } else {
             int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
             server = api.start(port);
