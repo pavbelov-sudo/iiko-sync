@@ -7,3 +7,11 @@ target/
 *.iml
 .vscode/
 dependency-reduced-pom.xml
+
+# run.sh runtime/конфигурация с реальными паролями и сертификатами - не в git
+logs/
+run/
+config/iiko-sync.env
+config/*.p12
+config/allowed-cns.txt
+data/
