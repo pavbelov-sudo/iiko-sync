@@ -4,8 +4,8 @@ import com.sun.net.httpserver.HttpServer;
 
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
-import java.util.LinkedHashSet;
-import java.util.Set;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -24,7 +24,11 @@ import java.util.concurrent.TimeUnit;
  *   TLS_CLIENT_AUTH_ENABLED    - true, чтобы требовать клиентский сертификат (mTLS; требует TLS_ENABLED=true)
  *   TLS_CLIENT_TRUSTSTORE      - PKCS12-хранилище с доверенным CA/сертификатами клиентов (обязательно при TLS_CLIENT_AUTH_ENABLED=true)
  *   TLS_CLIENT_TRUSTSTORE_PASSWORD - пароль этого хранилища (обязательно при TLS_CLIENT_AUTH_ENABLED=true)
- *   TLS_CLIENT_ALLOWED_CNS     - список через запятую разрешённых CommonName сертификата клиента (обязательно при TLS_CLIENT_AUTH_ENABLED=true)
+ *   TLS_CLIENT_ALLOWED_CNS_FILE - путь к текстовому файлу со списком разрешённых CommonName
+ *                                 сертификата клиента, по одному на строку (строки с # и пустые
+ *                                 игнорируются); обязателен при TLS_CLIENT_AUTH_ENABLED=true.
+ *                                 Файл можно редактировать прямо на сервере - изменения
+ *                                 подхватываются на лету, без перезапуска приложения (см. {@link ClientCnAllowlist})
  *
  * <p><b>MODE=sync</b> - прежний пакетный режим: сам получает и обновляет токен,
  * периодически выгружает номенклатуру/стоп-листы/меню в локальный SQLite (см. {@link SyncService}).
@@ -87,7 +91,7 @@ public class Main {
             if (clientAuth) {
                 String truststorePath = System.getenv("TLS_CLIENT_TRUSTSTORE");
                 String truststorePassword = System.getenv("TLS_CLIENT_TRUSTSTORE_PASSWORD");
-                String allowedCnsRaw = System.getenv("TLS_CLIENT_ALLOWED_CNS");
+                String allowedCnsFile = System.getenv("TLS_CLIENT_ALLOWED_CNS_FILE");
                 if (truststorePath == null || truststorePath.isBlank()) {
                     System.err.println("TLS_CLIENT_AUTH_ENABLED=true, но не задан TLS_CLIENT_TRUSTSTORE");
                     System.exit(1);
@@ -98,20 +102,22 @@ public class Main {
                     System.exit(1);
                     return;
                 }
-                if (allowedCnsRaw == null || allowedCnsRaw.isBlank()) {
-                    System.err.println("TLS_CLIENT_AUTH_ENABLED=true, но не задан TLS_CLIENT_ALLOWED_CNS (список через запятую)");
+                if (allowedCnsFile == null || allowedCnsFile.isBlank()) {
+                    System.err.println("TLS_CLIENT_AUTH_ENABLED=true, но не задан TLS_CLIENT_ALLOWED_CNS_FILE (путь к файлу со списком CN)");
                     System.exit(1);
                     return;
                 }
-                Set<String> allowedCns = new LinkedHashSet<>();
-                for (String cn : allowedCnsRaw.split(",")) {
-                    String trimmed = cn.trim();
-                    if (!trimmed.isEmpty()) {
-                        allowedCns.add(trimmed);
-                    }
+                Path cnsPath = Path.of(allowedCnsFile);
+                if (!Files.isReadable(cnsPath)) {
+                    System.err.println("TLS_CLIENT_ALLOWED_CNS_FILE=" + allowedCnsFile + " не найден или недоступен для чтения");
+                    System.exit(1);
+                    return;
                 }
-                if (allowedCns.isEmpty()) {
-                    System.err.println("TLS_CLIENT_ALLOWED_CNS задан, но после разбора не содержит ни одного CN");
+                ClientCnAllowlist allowedCns;
+                try {
+                    allowedCns = ClientCnAllowlist.loadInitial(cnsPath);
+                } catch (Exception e) {
+                    System.err.println("Не удалось загрузить TLS_CLIENT_ALLOWED_CNS_FILE=" + allowedCnsFile + ": " + e.getMessage());
                     System.exit(1);
                     return;
                 }

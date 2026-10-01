@@ -25,7 +25,6 @@ import java.net.InetSocketAddress;
 import java.security.KeyStore;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
-import java.util.Set;
 import java.util.concurrent.Executors;
 
 /**
@@ -83,7 +82,8 @@ public class ApiServer {
      * {@code clientAuth.truststorePath}; клиент без валидного сертификата не сможет даже
      * установить TLS-соединение - это закрывает эндпоинт от анонимного трафика ещё до того,
      * как запрос доберётся до кода приложения. Дополнительно CommonName (CN) сертификата
-     * клиента сверяется со списком {@code clientAuth.allowedCommonNames} - см. {@link #wrap}.
+     * клиента сверяется со списком из файла {@code clientAuth.allowedCommonNames} - см. {@link #wrap}
+     * и {@link ClientCnAllowlist}.
      */
     public HttpServer startHttps(int port, String keystorePath, char[] keystorePassword,
                                   ClientAuthConfig clientAuth) throws Exception {
@@ -157,7 +157,7 @@ public class ApiServer {
             try {
                 if (clientAuthConfig != null) {
                     String cn = extractClientCommonName(ex);
-                    if (cn == null || !clientAuthConfig.allowedCommonNames.contains(cn)) {
+                    if (cn == null || !clientAuthConfig.allowedCommonNames.isAllowed(cn)) {
                         respondError(ex, 403, "Сертификат клиента не авторизован"
                                 + (cn != null ? " (CN=" + cn + ")" : " (CN не определён)"));
                         return;
@@ -201,13 +201,17 @@ public class ApiServer {
         }
     }
 
-    /** Параметры mTLS: truststore с доверенным CA/сертификатами клиентов и разрешённые CN. */
+    /**
+     * Параметры mTLS: truststore с доверенным CA/сертификатами клиентов и разрешённые CN,
+     * загружаемые из файла (см. {@link ClientCnAllowlist}) - администратор может редактировать
+     * этот файл в любой момент, список применяется без перезапуска приложения.
+     */
     public static class ClientAuthConfig {
         final String truststorePath;
         final char[] truststorePassword;
-        final Set<String> allowedCommonNames;
+        final ClientCnAllowlist allowedCommonNames;
 
-        public ClientAuthConfig(String truststorePath, char[] truststorePassword, Set<String> allowedCommonNames) {
+        public ClientAuthConfig(String truststorePath, char[] truststorePassword, ClientCnAllowlist allowedCommonNames) {
             this.truststorePath = truststorePath;
             this.truststorePassword = truststorePassword;
             this.allowedCommonNames = allowedCommonNames;
